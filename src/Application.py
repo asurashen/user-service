@@ -3,14 +3,226 @@ import logging
 from collections import defaultdict
 from datetime import datetime
 from flask import Flask, Response, request
-
-
+from datetime import timedelta
+from flask import session
 from user_resource import UserResource
+# Python standard libraries
+import json
+import os
+import sqlite3
 
+# Third party libraries
+from flask import Flask, redirect, request, url_for
+from flask_login import (
+    LoginManager,
+    current_user,
+    login_required,
+    login_user,
+    logout_user,
+)
+from oauthlib.oauth2 import WebApplicationClient
+import requests
+
+# Internal imports
+from user import User
+from flask_cors import CORS
+from flask_wtf.csrf import CSRFProtect, generate_csrf
+
+# Configuration
+GOOGLE_CLIENT_ID = "260669321555-0gh3da24debt1goor8ku6if4s9a5p8nd.apps.googleusercontent.com"
+GOOGLE_CLIENT_SECRET = "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"
+GOOGLE_DISCOVERY_URL = (
+    "https://accounts.google.com/.well-known/openid-configuration"
+)
+FE_ENDPOINT = "https://d3ijm3vkx9vv7d.cloudfront.net" # must be https behind cloudFront
+SERVICE_ENDPOINT = "https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com" # must be https behind API gatewat
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
+# Flask app setup
 logging.basicConfig(level=logging.INFO)
 
 # Create the Flask application object.
 app = Flask(__name__)
+app.config.update(
+    SECRET_KEY="secret_sauce",
+    SESSION_COOKIE_HTTPONLY=True,
+    REMEMBER_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+
+#app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
+#os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
+# User session management setup
+# https://flask-login.readthedocs.io/en/latest
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.session_protection = "strong"
+
+csrf = CSRFProtect(app)
+cors = CORS(
+    app,
+    resources={r"*": {"origins": "http://localhost:4200,"+FE_ENDPOINT}},
+    expose_headers=["Content-Type", "X-CSRFToken"],
+    supports_credentials=True,
+)
+
+
+@login_manager.unauthorized_handler
+def unauthorized():
+    return "You must be logged in to access this content.", 403
+
+# OAuth2 client setup
+client = WebApplicationClient(GOOGLE_CLIENT_ID)
+
+
+# Flask-Login helper to retrieve a user from our db
+@login_manager.user_loader
+def load_user(user_id):
+    print("hello???")
+    return User.get(user_id)
+
+whitelist = ["googleLogin",
+             "checkIsAuthenticated",
+             "callback",
+             "post_user_register",
+             "get_all_users",
+             "get_health",
+             "validate_email",
+             "get_user_by_login"]
+@app.before_request
+def before_request():
+    print("cookie", request.cookies.get('session'))
+    if request.endpoint not in whitelist and not current_user.is_authenticated:
+        return redirect(f"{FE_ENDPOINT}/login")
+
+@app.route('/auth',methods = ['GET'])
+def checkIsAuthenticated():
+    print("cookie", request.cookies.get('session'))
+    if current_user.is_authenticated:
+       data = current_user.id
+    else:
+       data = -1
+    response = app.response_class(
+        response=json.dumps(data),
+        status=200,
+        mimetype='application/json'
+    )
+    response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200,{FE_ENDPOINT}")
+    response.headers.add("Access-Control-Allow-Credentials", "true")
+    return response
+
+@app.route("/googleLogin")
+def googleLogin():
+    site = request.args.get('site')
+    # Find out what URL to hit for Google login
+    google_provider_cfg = get_google_provider_cfg()
+    authorization_endpoint = google_provider_cfg["authorization_endpoint"]
+    print("authorization_endpoint", authorization_endpoint)
+
+    # Use library to construct the request for login and provide
+    # scopes that let you retrieve user's profile from Google
+    request_uri = client.prepare_request_uri(
+        authorization_endpoint,
+        redirect_uri=SERVICE_ENDPOINT+"/googleLogin/callback",
+        scope=["openid", "email", "profile"],
+        state=site
+    )
+    print("request_uri", request_uri)
+    return redirect(request_uri)
+
+
+@app.route("/googleLogin/callback")
+def callback():
+    print(request)
+    # Get authorization code Google sent back to you
+    code = request.args.get("code")
+    site = request.args.get('state')
+
+
+    # Find out what URL to hit to get tokens that allow you to ask for
+    # things on behalf of a user
+    google_provider_cfg = get_google_provider_cfg()
+    token_endpoint = google_provider_cfg["token_endpoint"]
+    print("debug1")
+
+    # Prepare and send request to get tokens! Yay tokens!
+    token_url, headers, body = client.prepare_token_request(
+        token_endpoint,
+        authorization_response=request.url,
+        redirect_url=SERVICE_ENDPOINT+"/googleLogin/callback",
+        code=code,
+    )
+    print("debug2", token_url, headers, body)
+    token_response = requests.post(
+        token_url,
+        headers=headers,
+        data=body,
+        auth=(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET),
+    )
+    print("debug3", token_response.json())
+
+    # Parse the tokens!
+    client.parse_request_body_response(json.dumps(token_response.json()))
+    print("debug4")
+    # Now that we have tokens (yay) let's find and hit URL
+    # from Google that gives you user's profile information,
+    # including their Google Profile Image and Email
+    userinfo_endpoint = google_provider_cfg["userinfo_endpoint"]
+    uri, headers, body = client.add_token(userinfo_endpoint)
+    userinfo_response = requests.get(uri, headers=headers, data=body)
+    print("debug5")
+
+    # We want to make sure their email is verified.
+    # The user authenticated with Google, authorized our
+    # app, and now we've verified their email through Google!
+    if userinfo_response.json().get("email_verified"):
+        unique_id = userinfo_response.json()["sub"]
+        users_email = userinfo_response.json()["email"]
+        picture = userinfo_response.json()["picture"]
+        users_name = userinfo_response.json()["given_name"]
+    else:
+        return "User email not available or not verified by Google.", 400
+
+    db_result = UserResource.validate_email(users_email)
+    print("debug6")
+    # Doesn't exist? Add to database
+    if not db_result:
+        return redirect(f"{FE_ENDPOINT}/register?email={users_email}&name={users_name}")
+    else:
+        print(db_result)
+        user = User(
+            id_=db_result[0][0], name="", email=users_email, profile_pic=picture
+        )
+
+    # Begin user session by logging the user in
+    login_user(user)
+    print(current_user)
+
+    # Send user back to homepage
+    if site is None:
+        return redirect(f"{FE_ENDPOINT}/home")
+    else:
+        return redirect(FE_ENDPOINT+site)
+
+
+@app.route("/logout")
+@login_required
+def logout():
+    print("logging out")
+    logout_user()
+    response = app.response_class(
+        response=json.dumps("success"),
+        status=200,
+        mimetype='application/json'
+    )
+    response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200,{FE_ENDPOINT}")
+    response.headers.add("Access-Control-Allow-Credentials", "true")
+    return response
+
+
+def get_google_provider_cfg():
+    return requests.get(GOOGLE_DISCOVERY_URL).json()
 
 
 @app.route('/', methods=["GET"])
@@ -30,6 +242,7 @@ def get_health():
 
 @app.route("/user", methods=["GET"])
 def get_all_users():
+    print("cookie", request.cookies.get('session'))
     db_result = UserResource.get_all_users()
     print(db_result)
     if db_result:
@@ -38,7 +251,6 @@ def get_all_users():
         rsp = Response(json.dumps(result), status=200, content_type="application.json")
     else:
         rsp = Response("NO USER EXIST", status=404, content_type="text/plain")
-
     return rsp
 
 @app.route("/user/<id>", methods=["GET"])
@@ -81,13 +293,25 @@ def get_user_by_login():
         username, password = args['username'],args['password']
         db_result = UserResource.get_user_by_login(username, password)
     if db_result:
-        db_result = db_result[0]
-        result = {'id': db_result[0]}
-        rsp = Response(json.dumps(result), status=200, content_type="application.json")
+        print(db_result)
+        user = User(db_result[0][0], db_result[0][1])
+        session.permanent = True
+        login_user(user, remember=True, duration=timedelta(days=1), force=True)
+        print(current_user)
+        print(current_user.is_authenticated)
+        response = app.response_class(
+            response=json.dumps({'id': db_result[0][0]}),
+            status=200,
+            mimetype='application/json'
+        )
+        response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200,{FE_ENDPOINT}")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response
     else:
         rsp = Response("NOT FOUND", status=404, content_type="text/plain")
 
     return rsp
+
 @app.route("/user/register", methods=["POST"])
 def post_user_register():
     #client = Client(AUTH_ID, AUTH_TOKEN)
@@ -111,6 +335,7 @@ def post_user_register():
         else:
             rsp = Response("NOT FOUND", status=404, content_type="text/plain")
     return rsp
+
 @app.route("/user/<id>", methods=["POST"])
 def post_teacher_course(id):
     if not request.args:
