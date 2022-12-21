@@ -47,7 +47,8 @@ app.config.update(
     SECRET_KEY="secret_sauce",
     SESSION_COOKIE_HTTPONLY=True,
     REMEMBER_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SAMESITE="None",
+    SESSION_COOKIE_SECURE = True
 )
 
 #app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
@@ -59,7 +60,7 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.session_protection = "strong"
 
-csrf = CSRFProtect(app)
+# http://ec2-3-227-213-133.compute-1.amazonaws.com:5011/user/register?password=test&address=test&email=abc&username=test = CSRFProtect(app)
 cors = CORS(
     app,
     resources={r"*": {"origins": "http://localhost:4200,"+FE_ENDPOINT}},
@@ -89,7 +90,8 @@ whitelist = ["googleLogin",
              "get_all_users",
              "get_health",
              "validate_email",
-             "get_user_by_login"]
+             "get_user_by_login",
+             "get_user_by_id"]
 @app.before_request
 def before_request():
     print("cookie", request.cookies.get('session'))
@@ -108,7 +110,7 @@ def checkIsAuthenticated():
         status=200,
         mimetype='application/json'
     )
-    response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200,{FE_ENDPOINT}")
+    response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200")
     response.headers.add("Access-Control-Allow-Credentials", "true")
     return response
 
@@ -216,7 +218,7 @@ def logout():
         status=200,
         mimetype='application/json'
     )
-    response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200,{FE_ENDPOINT}")
+    response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200")
     response.headers.add("Access-Control-Allow-Credentials", "true")
     return response
 
@@ -304,7 +306,7 @@ def get_user_by_login():
             status=200,
             mimetype='application/json'
         )
-        response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200,{FE_ENDPOINT}")
+        response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200")
         response.headers.add("Access-Control-Allow-Credentials", "true")
         return response
     else:
@@ -317,6 +319,7 @@ def post_user_register():
     #client = Client(AUTH_ID, AUTH_TOKEN)
     if not request.args:
         logging.info('user register info is empty')
+        rsp = Response('user register info is empty', status=400, content_type="text/plain")
     else:
         args = dict(request.args)
         username, password, email, address = args['username'], args['password'], args['email'], args['address']
