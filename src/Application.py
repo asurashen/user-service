@@ -3,7 +3,8 @@ import logging
 from collections import defaultdict
 from datetime import datetime
 from flask import Flask, Response, request
-
+from datetime import timedelta
+from flask import session
 from user_resource import UserResource
 # Python standard libraries
 import json
@@ -40,15 +41,14 @@ logging.basicConfig(level=logging.INFO)
 # Create the Flask application object.
 app = Flask(__name__)
 app.config.update(
-    DEBUG=True,
     SECRET_KEY="secret_sauce",
     SESSION_COOKIE_HTTPONLY=True,
     REMEMBER_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
 )
 
-app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+#app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
+#os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 # User session management setup
 # https://flask-login.readthedocs.io/en/latest
@@ -89,14 +89,13 @@ whitelist = ["googleLogin",
              "get_user_by_login"]
 @app.before_request
 def before_request():
-    print(request.endpoint)
-    print(request.endpoint not in whitelist )
+    print("cookie", request.cookies.get('session'))
     if request.endpoint not in whitelist and not current_user.is_authenticated:
         return redirect("https://d1dp9xzujhowgt.cloudfront.net/login")
 
 @app.route('/auth',methods = ['GET'])
 def checkIsAuthenticated():
-    print(current_user)
+    print("cookie", request.cookies.get('session'))
     if current_user.is_authenticated:
        data = current_user.id
     else:
@@ -106,7 +105,7 @@ def checkIsAuthenticated():
         status=200,
         mimetype='application/json'
     )
-    response.headers.add("Access-Control-Allow-Origin", "http://localhost:4200, https://d1dp9xzujhowgt.cloudfront.net/")
+    response.headers.add("Access-Control-Allow-Origin", "https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com,http://localhost:4200,https://d1dp9xzujhowgt.cloudfront.net/")
     response.headers.add("Access-Control-Allow-Credentials", "true")
     return response
 
@@ -122,7 +121,7 @@ def googleLogin():
     # scopes that let you retrieve user's profile from Google
     request_uri = client.prepare_request_uri(
         authorization_endpoint,
-        redirect_uri=request.base_url + "/callback",
+        redirect_uri="https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com/googleLogin/callback",
         scope=["openid", "email", "profile"],
         state=site
     )
@@ -142,30 +141,34 @@ def callback():
     # things on behalf of a user
     google_provider_cfg = get_google_provider_cfg()
     token_endpoint = google_provider_cfg["token_endpoint"]
+    print("debug1")
 
     # Prepare and send request to get tokens! Yay tokens!
     token_url, headers, body = client.prepare_token_request(
         token_endpoint,
         authorization_response=request.url,
-        redirect_url=request.base_url,
+        redirect_url="https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com/googleLogin/callback",
         code=code,
     )
+    print("debug2", token_url, headers, body)
     token_response = requests.post(
         token_url,
         headers=headers,
         data=body,
         auth=(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET),
     )
+    print("debug3", token_response.json())
 
     # Parse the tokens!
     client.parse_request_body_response(json.dumps(token_response.json()))
-
+    print("debug4")
     # Now that we have tokens (yay) let's find and hit URL
     # from Google that gives you user's profile information,
     # including their Google Profile Image and Email
     userinfo_endpoint = google_provider_cfg["userinfo_endpoint"]
     uri, headers, body = client.add_token(userinfo_endpoint)
     userinfo_response = requests.get(uri, headers=headers, data=body)
+    print("debug5")
 
     # We want to make sure their email is verified.
     # The user authenticated with Google, authorized our
@@ -179,6 +182,7 @@ def callback():
         return "User email not available or not verified by Google.", 400
 
     db_result = UserResource.validate_email(users_email)
+    print("debug6")
     # Doesn't exist? Add to database
     if not db_result:
         return redirect(f"https://d1dp9xzujhowgt.cloudfront.net/register?email={users_email}&name={users_name}")
@@ -190,6 +194,7 @@ def callback():
 
     # Begin user session by logging the user in
     login_user(user)
+    print(current_user)
 
     # Send user back to homepage
     if site is None:
@@ -208,7 +213,7 @@ def logout():
         status=200,
         mimetype='application/json'
     )
-    response.headers.add("Access-Control-Allow-Origin", "http://localhost:4200, https://d1dp9xzujhowgt.cloudfront.net/")
+    response.headers.add("Access-Control-Allow-Origin", "https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com,http://localhost:4200,https://d1dp9xzujhowgt.cloudfront.net/")
     response.headers.add("Access-Control-Allow-Credentials", "true")
     return response
 
@@ -234,6 +239,7 @@ def get_health():
 
 @app.route("/user", methods=["GET"])
 def get_all_users():
+    print("cookie", request.cookies.get('session'))
     db_result = UserResource.get_all_users()
     print(db_result)
     if db_result:
@@ -242,7 +248,6 @@ def get_all_users():
         rsp = Response(json.dumps(result), status=200, content_type="application.json")
     else:
         rsp = Response("NO USER EXIST", status=404, content_type="text/plain")
-
     return rsp
 
 @app.route("/user/<id>", methods=["GET"])
@@ -287,13 +292,16 @@ def get_user_by_login():
     if db_result:
         print(db_result)
         user = User(db_result[0][0], db_result[0][1])
-        login_user(user)
+        session.permanent = True
+        login_user(user, remember=True, duration=timedelta(days=1), force=True)
+        print(current_user)
+        print(current_user.is_authenticated)
         response = app.response_class(
             response=json.dumps({'id': db_result[0][0]}),
             status=200,
             mimetype='application/json'
         )
-        response.headers.add("Access-Control-Allow-Origin", "http://localhost:4200, https://d1dp9xzujhowgt.cloudfront.net/")
+        response.headers.add("Access-Control-Allow-Origin", "https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com,http://localhost:4200,https://d1dp9xzujhowgt.cloudfront.net/")
         response.headers.add("Access-Control-Allow-Credentials", "true")
         return response
     else:
@@ -343,4 +351,4 @@ def post_teacher_course(id):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5011)
