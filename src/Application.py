@@ -34,6 +34,9 @@ GOOGLE_CLIENT_SECRET = "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"
 GOOGLE_DISCOVERY_URL = (
     "https://accounts.google.com/.well-known/openid-configuration"
 )
+FE_ENDPOINT = "https://d3ijm3vkx9vv7d.cloudfront.net" # must be https behind cloudFront
+SERVICE_ENDPOINT = "https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com" # must be https behind API gatewat
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 # Flask app setup
 logging.basicConfig(level=logging.INFO)
@@ -59,7 +62,7 @@ login_manager.session_protection = "strong"
 csrf = CSRFProtect(app)
 cors = CORS(
     app,
-    resources={r"*": {"origins": "http://localhost:4200,https://d1dp9xzujhowgt.cloudfront.net/"}},
+    resources={r"*": {"origins": "http://localhost:4200,"+FE_ENDPOINT}},
     expose_headers=["Content-Type", "X-CSRFToken"],
     supports_credentials=True,
 )
@@ -91,7 +94,7 @@ whitelist = ["googleLogin",
 def before_request():
     print("cookie", request.cookies.get('session'))
     if request.endpoint not in whitelist and not current_user.is_authenticated:
-        return redirect("https://d1dp9xzujhowgt.cloudfront.net/login")
+        return redirect(f"{FE_ENDPOINT}/login")
 
 @app.route('/auth',methods = ['GET'])
 def checkIsAuthenticated():
@@ -105,7 +108,7 @@ def checkIsAuthenticated():
         status=200,
         mimetype='application/json'
     )
-    response.headers.add("Access-Control-Allow-Origin", "https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com,http://localhost:4200,https://d1dp9xzujhowgt.cloudfront.net/")
+    response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200,{FE_ENDPOINT}")
     response.headers.add("Access-Control-Allow-Credentials", "true")
     return response
 
@@ -121,7 +124,7 @@ def googleLogin():
     # scopes that let you retrieve user's profile from Google
     request_uri = client.prepare_request_uri(
         authorization_endpoint,
-        redirect_uri="https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com/googleLogin/callback",
+        redirect_uri=SERVICE_ENDPOINT+"/googleLogin/callback",
         scope=["openid", "email", "profile"],
         state=site
     )
@@ -147,7 +150,7 @@ def callback():
     token_url, headers, body = client.prepare_token_request(
         token_endpoint,
         authorization_response=request.url,
-        redirect_url="https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com/googleLogin/callback",
+        redirect_url=SERVICE_ENDPOINT+"/googleLogin/callback",
         code=code,
     )
     print("debug2", token_url, headers, body)
@@ -185,7 +188,7 @@ def callback():
     print("debug6")
     # Doesn't exist? Add to database
     if not db_result:
-        return redirect(f"https://d1dp9xzujhowgt.cloudfront.net/register?email={users_email}&name={users_name}")
+        return redirect(f"{FE_ENDPOINT}/register?email={users_email}&name={users_name}")
     else:
         print(db_result)
         user = User(
@@ -198,9 +201,9 @@ def callback():
 
     # Send user back to homepage
     if site is None:
-        return redirect("https://d1dp9xzujhowgt.cloudfront.net/home")
+        return redirect(f"{FE_ENDPOINT}/home")
     else:
-        return redirect("https://d1dp9xzujhowgt.cloudfront.net"+site)
+        return redirect(FE_ENDPOINT+site)
 
 
 @app.route("/logout")
@@ -213,7 +216,7 @@ def logout():
         status=200,
         mimetype='application/json'
     )
-    response.headers.add("Access-Control-Allow-Origin", "https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com,http://localhost:4200,https://d1dp9xzujhowgt.cloudfront.net/")
+    response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200,{FE_ENDPOINT}")
     response.headers.add("Access-Control-Allow-Credentials", "true")
     return response
 
@@ -301,7 +304,7 @@ def get_user_by_login():
             status=200,
             mimetype='application/json'
         )
-        response.headers.add("Access-Control-Allow-Origin", "https://dtb4e9nmki.execute-api.us-east-1.amazonaws.com,http://localhost:4200,https://d1dp9xzujhowgt.cloudfront.net/")
+        response.headers.add("Access-Control-Allow-Origin", f"http://localhost:4200,{FE_ENDPOINT}")
         response.headers.add("Access-Control-Allow-Credentials", "true")
         return response
     else:
